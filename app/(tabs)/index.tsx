@@ -1,98 +1,160 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
-
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+import React, { useState } from 'react';
+import { StyleSheet, Text, View, TouchableOpacity, Alert } from 'react-native';
+import { supabase } from '../../supabase'; // Adjust path if your file is in root or src/
 
 export default function HomeScreen() {
-  return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+  // Local state to simulate user role until auth is connected
+  const [userRole, setUserRole] = useState('user'); // Options: 'user' or 'cfr'
+  const [isEmergencyActive, setIsEmergencyActive] = useState(false);
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+  const handleEmergencyTrigger = async () => {
+    setIsEmergencyActive(true);
+    Alert.alert(
+      "Emergency Triggered", 
+      "Initializing AI Coach and locating closest responders/hospitals parallelly...",
+      [{ text: "OK" }]
+    );
+
+    // TODO: Connect this to your Supabase insert logic next week
+    console.log("Orchestrator firing concurrent streams...");
+  };
+
+  return (
+    <View style={styles.container}>
+      {/* Top Status Bar */}
+      <View style={styles.header}>
+        <Text style={styles.appTitle}>Golden Minutes</Text>
+        <TouchableOpacity 
+          style={styles.roleBadge} 
+          onPress={() => setUserRole(userRole === 'user' ? 'cfr' : 'user')}
+        >
+          <Text style={styles.roleText}>Mode: {userRole.toUpperCase()}</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Main Action Content Area */}
+      <View style={styles.content}>
+        {userRole === 'user' ? (
+          <View style={styles.centerAlign}>
+            <Text style={styles.subText}>Tap below only in immediate medical distress</Text>
+            
+            <TouchableOpacity style={styles.emergencyButton} onPress={handleEmergencyTrigger}>
+              <Text style={styles.buttonText}>EMERGENCY</Text>
+            </TouchableOpacity>
+
+            {isEmergencyActive && (
+              <Text style={styles.activePulse}>System Status: Parallel Dispatching Active...</Text>
+            )}
+          </View>
+        ) : (
+          <View style={styles.centerAlign}>
+            <Text style={styles.cfrWelcome}>Volunteer Dashboard (CFR)</Text>
+            <Text style={styles.cfrSubText}>You are currently listed as active. Keep the app running to receive proximity alerts.</Text>
+            
+            <TouchableOpacity style={styles.statusToggle}>
+              <Text style={styles.statusToggleText}>Status: On Duty</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
+  container: {
+    flex: 1,
+    backgroundColor: '#fff',
+    paddingTop: 50,
+  },
+  header: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 8,
+    paddingHorizontal: 20,
+    paddingBottom: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
+  appTitle: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    color: '#1a1a1a',
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  roleBadge: {
+    backgroundColor: '#e0e0e0',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 20,
   },
+  roleText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#333',
+  },
+  content: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 30,
+  },
+  centerAlign: {
+    alignItems: 'center',
+    width: '100%',
+  },
+  subText: {
+    fontSize: 16,
+    color: '#666',
+    marginBottom: 30,
+    textAlign: 'center',
+  },
+  emergencyButton: {
+    backgroundColor: '#dc3545',
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 5,
+  },
+  buttonText: {
+    color: '#fff',
+    fontSize: 26,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
+  activePulse: {
+    marginTop: 25,
+    color: '#dc3545',
+    fontWeight: '600',
+    fontSize: 15,
+  },
+  cfrWelcome: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#0d6efd',
+    marginBottom: 10,
+  },
+  cfrSubText: {
+    fontSize: 15,
+    color: '#555',
+    textAlign: 'center',
+    marginBottom: 30,
+    lineHeight: 22,
+  },
+  statusToggle: {
+    backgroundColor: '#198754',
+    paddingVertical: 12,
+    paddingHorizontal: 40,
+    borderRadius: 8,
+  },
+  statusToggleText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  }
 });
