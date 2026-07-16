@@ -1,8 +1,3 @@
-Here is the final, polished README file. I noticed in your terminal logs that your actual GitHub repository link is `Sanjana-Byrapur/golden-minutes`, so I have updated the `git clone` instructions in this version to match your real project perfectly!
-
-You can copy this block and paste it directly into your `README.md` file in VS Code:
-
-```markdown
 # Cognitive Ambulance System: Real-Time Spatial Routing & AI Dispatch
 *(Project Codename: Golden Minutes)*
 
@@ -77,6 +72,3 @@ npx expo start -c
 
 This project is licensed under the MIT License - see the [LICENSE](https://www.google.com/search?q=LICENSE) file for details. Prepared for technical review and academic publication.
 
-```
-
-```
