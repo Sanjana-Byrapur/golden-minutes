@@ -1,3 +1,8 @@
+Here is the final, polished README file. I noticed in your terminal logs that your actual GitHub repository link is `Sanjana-Byrapur/golden-minutes`, so I have updated the `git clone` instructions in this version to match your real project perfectly!
+
+You can copy this block and paste it directly into your `README.md` file in VS Code:
+
+```markdown
 # Cognitive Ambulance System: Real-Time Spatial Routing & AI Dispatch
 *(Project Codename: Golden Minutes)*
 
@@ -31,34 +36,47 @@ An intelligent, multi-tier emergency dispatch platform engineered to eliminate t
 To run this project locally, you will need Node.js, Expo CLI, and a Supabase project configured with the PostGIS extension.
 
 **1. Clone the repository**
-\`\`\`bash
-git clone https://github.com/yourusername/agentic-ambulance.git
-cd agentic-ambulance
-\`\`\`
+```bash
+git clone [https://github.com/Sanjana-Byrapur/golden-minutes.git](https://github.com/Sanjana-Byrapur/golden-minutes.git)
+cd golden-minutes
+
+```
 
 **2. Install dependencies**
-\`\`\`bash
+
+```bash
 npm install
 # Or use Expo CLI for exact versions
 npx expo install
-\`\`\`
+
+```
 
 **3. Configure Environment Variables**
-Create a \`.env\` file in the root directory and add your API keys:
-\`\`\`env
+Create a `.env` file in the root directory and add your API keys:
+
+```env
 EXPO_PUBLIC_SUPABASE_URL=your_supabase_project_url
 EXPO_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
 EXPO_PUBLIC_GROQ_API_KEY=your_groq_api_key
-\`\`\`
+
+```
 
 **4. Database Setup (Supabase SQL Editor)**
-Ensure the \`postgis\` extension is enabled in your database. Run the included \`schema.sql\` (located in the \`/docs\` folder) in your Supabase SQL editor to generate the \`profiles\` and \`emergencies\` tables, establish the JSONB medical profile structures, and define the geospatial \`POINT\` columns.
+Ensure the `postgis` extension is enabled in your database. Run the included `schema.sql` (located in the `/docs` folder) in your Supabase SQL editor to generate the `profiles` and `emergencies` tables, establish the JSONB medical profile structures, and define the geospatial `POINT` columns.
 
 **5. Start the Application**
-\`\`\`bash
+
+```bash
 npx expo start -c
-\`\`\`
+
+```
+
 *Scan the generated QR code with the Expo Go app on your physical iOS/Android device to test the native SMS and Location APIs.*
 
 ## 📄 License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details. Prepared for technical review and academic publication.
+
+This project is licensed under the MIT License - see the [LICENSE](https://www.google.com/search?q=LICENSE) file for details. Prepared for technical review and academic publication.
+
+```
+
+```
