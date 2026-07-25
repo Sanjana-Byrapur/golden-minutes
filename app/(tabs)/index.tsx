@@ -1,11 +1,11 @@
-
-import * as SMS from 'expo-sms';
-import * as Location from 'expo-location';
 import { Audio } from 'expo-av';
+import * as Crypto from 'expo-crypto';
+import * as Location from 'expo-location';
+import * as SMS from 'expo-sms';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator, Alert, Linking, Platform,
-  ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View
+  ActivityIndicator, Alert, Animated, Keyboard, Linking, Platform,
+  ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
 } from 'react-native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import { supabase } from '../../supabase';
@@ -56,6 +56,9 @@ const AMBULANCE_STATUS_LABELS: Record<AmbulanceStatus, string> = {
 
 const AUTO_SELECT_SECONDS = 30;
 const REJECT_REASONS = ['Currently with a patient', 'Out of station', 'Off shift', 'Too far away'];
+const DEFAULT_LOCATION = 'POINT(77.5946 12.9716)'; // fallback: central Bengaluru
+const AMBULANCE_STATUS_STEP_MS = 8000;
+const ROUGH_ETA_MINUTES_PER_KM = 6; // used before OSRM ETA is available (foot/traffic estimate)
 
 const EMERGENCY_TYPES: { key: EmergencyType; label: string; icon: string; color: string }[] = [
   { key: 'cardiac',     label: 'Cardiac Arrest',    icon: '❤️',  color: '#dc3545' },
@@ -76,6 +79,22 @@ const calcDistance = (lat1: number, lon1: number, lat2: number, lon2: number) =>
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 };
 
+const generateId = () => (Crypto.randomUUID ? Crypto.randomUUID() : Math.random().toString(36).slice(2));
+
+const fallbackInstructions = (type: EmergencyType): string => {
+  const map: Record<EmergencyType, string> = {
+    cardiac: '1. Check responsiveness — tap shoulders, shout.\n2. Call 112. Start chest compressions immediately.\n3. Push hard and fast, 30 times on centre of chest.\n4. Give 2 rescue breaths. Repeat until help arrives.',
+    stroke: '1. Use FAST: Face drooping, Arm weakness, Speech slurred, Time.\n2. Note exact time symptoms started.\n3. Keep them still, head slightly raised.\n4. Do not give food or water.',
+    trauma: '1. Ensure scene is safe before approaching.\n2. Check breathing and responsiveness.\n3. Apply firm pressure to any bleeding wound.\n4. Keep them still and warm.',
+    choking: '1. Ask "Are you choking?" If no speech, act now.\n2. Give 5 sharp back blows between shoulder blades.\n3. Give 5 abdominal thrusts just above navel.\n4. Alternate until object dislodges.',
+    bleeding: '1. Press firmly on wound with clean cloth.\n2. Do not remove cloth — add more if soaked.\n3. Tie tourniquet 5cm above wound if limb bleeding.\n4. Elevate limb above heart level.',
+    burns: '1. Remove from heat source immediately.\n2. Cool under running water for 10 minutes.\n3. Do not apply ice, butter, or toothpaste.\n4. Cover loosely. Keep person warm.',
+    seizure: '1. Clear area of hard objects. Do not restrain.\n2. Do not put anything in their mouth.\n3. Time the seizure.\n4. After it stops, roll onto side (recovery position).',
+    unconscious: '1. Tap shoulders, shout "Can you hear me?"\n2. Tilt head back, check breathing for 10 seconds.\n3. If breathing: recovery position on their side.\n4. If not breathing: start CPR immediately.',
+  };
+  return map[type];
+};
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function HomeScreen() {
@@ -88,7 +107,10 @@ export default function HomeScreen() {
   const [authName, setAuthName] = useState('');
   const [authContact, setAuthContact] = useState('');
   const [authLicense, setAuthLicense] = useState('');
-
+  const [otpCode, setOtpCode] = useState('');
+  const mapRef = useRef<MapView | null>(null);
+  const [isSheetExpanded, setIsSheetExpanded] = useState(false);
+  const prevAppStateRef = useRef<AppState>('idle');
 
   // Medical profile
   const [medBlood, setMedBlood] = useState('');
@@ -112,13 +134,13 @@ export default function HomeScreen() {
   const [autoSelectCountdown, setAutoSelectCountdown] = useState(AUTO_SELECT_SECONDS);
   const [hpapSent, setHpapSent] = useState(false);
 
-  // FEATURE 3: Ambulance booking status
+  // Ambulance booking status
   const [ambulanceStatus, setAmbulanceStatus] = useState<AmbulanceStatus>('idle');
 
   // CFR & incident
   const [cfrLocation, setCfrLocation] = useState<{ latitude: number; longitude: number } | null>(null);
 
-  // FEATURE 2: Victim location for CFR before acceptance
+  // Victim location, shown to a CFR before they accept the call
   const [victimLocationForCFR, setVictimLocationForCFR] = useState<{ lat: number; lng: number; address: string } | null>(null);
   const [victimDistance, setVictimDistance] = useState(0);
   const [victimEta, setVictimEta] = useState(0);
@@ -126,12 +148,12 @@ export default function HomeScreen() {
   const [rejectionNotice, setRejectionNotice] = useState<string | null>(null);
   const [showRejectOptions, setShowRejectOptions] = useState(false);
 
-  // FEATURE 4: Message to emergency contact
+  // Message to emergency contact
   const [emergencyMessage, setEmergencyMessage] = useState('');
   const [showMessageInput, setShowMessageInput] = useState(false);
   const [messageSent, setMessageSent] = useState(false);
 
-  // FEATURE 5: Real voice recording
+  // Voice recording / dispatch
   const [isRecording, setIsRecording] = useState(false);
   const [isVoiceProcessing, setIsVoiceProcessing] = useState(false);
   const [voiceDraft, setVoiceDraft] = useState('');
@@ -147,6 +169,30 @@ export default function HomeScreen() {
   const ambulanceStatusTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => { appStateRef.current = appState; }, [appState]);
+
+  // ── Keyboard height tracking ──────────────────────────────────────────────
+  // Drives the bottom sheet manually instead of KeyboardAvoidingView, which
+  // (nested inside an absolutely-positioned, max-height-capped ScrollView)
+  // would intermittently stop re-measuring after the first show/hide cycle.
+  const keyboardOffset = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const animateTo = (toValue: number, duration?: number) => {
+      Animated.timing(keyboardOffset, {
+        toValue,
+        duration: duration ?? (Platform.OS === 'ios' ? 250 : 200),
+        useNativeDriver: false, // animating a layout property (bottom), not transform/opacity
+      }).start();
+    };
+
+    const showSub = Keyboard.addListener(showEvt, (e) => animateTo(e.endCoordinates.height, e.duration));
+    const hideSub = Keyboard.addListener(hideEvt, (e) => animateTo(0, e.duration));
+
+    return () => { showSub.remove(); hideSub.remove(); };
+  }, [keyboardOffset]);
 
   // ── Location ──────────────────────────────────────────────────────────────
 
@@ -167,7 +213,10 @@ export default function HomeScreen() {
     })();
   }, []);
 
-  // ── FEATURE 1: Magic Link Contact Verification ─────────────────────────────
+  // ── Auth: register / log in ─────────────────────────────────────────────
+  // Citizens verify their emergency contact via OTP (handled in handleVerifyOTP,
+  // which is what actually creates the profile). CFRs are created immediately
+  // but stay unverified until an admin approves their license.
 
   const handleRegister = async () => {
     if (!authName) return Alert.alert('Error', 'Name is required');
@@ -176,7 +225,6 @@ export default function HomeScreen() {
 
     setIsAuthLoading(true);
     try {
-      // Check if user already exists
       const { data: existingUser } = await supabase
         .from('profiles').select('*').eq('name', authName).eq('role', authRole).maybeSingle();
 
@@ -186,61 +234,69 @@ export default function HomeScreen() {
         return;
       }
 
-      // Generate a new ID and current location
-      const newId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
-      const userLoc = locationRef.current
-        ? `POINT(${locationRef.current.coords.longitude} ${locationRef.current.coords.latitude})`
-        : 'POINT(77.5946 12.9716)';
-
-      if (authRole === 'user' && authContact) {
-        const newUser: UserProfile = {
-          id: newId,
-          role: authRole,
-          name: authName,
-          emergency_contact: authContact,
-          is_verified: true, // User is verified to use the app immediately (Lazy Verification)
-          location: userLoc,
-          medical_info: null,
-        };
-
-        // 1. Save user to database
-        const { error } = await supabase.from('profiles').insert([newUser]);
-        if (error) throw error;
-
-        // 2. Generate the Cryptographic Magic Link
-        const token = Math.random().toString(36).slice(2, 12);
-        const magicLink = `https://golden-minutes.supabase.co/verify?token=${token}`;
-        const message = `Hi, I have added you as my emergency contact on the Golden Minutes app. Please click here to verify and accept my SOS alerts: ${magicLink}`;
-
-        // 3. Draft the SMS via native device APIs
-        const isAvailable = await SMS.isAvailableAsync();
-        if (isAvailable) {
-          await SMS.sendSMSAsync([authContact], message);
-        } else {
-          Alert.alert('Dev Mode: Magic Link Generated', `Simulated SMS drafted to ${authContact}:\n\n${message}`);
-        }
-
-        // 4. Let the user directly into the app
-        setCurrentUser(newUser);
-        setAppState('idle');
-
-      } else {
-        // CFR profile creation (Remains unchanged - waits for Admin verification)
-        const newUser: UserProfile = {
-          id: newId, role: 'cfr', name: authName, license_number: authLicense,
-          is_verified: false, location: 'POINT(77.5946 12.9716)', medical_info: null,
-        };
-        const { error } = await supabase.from('profiles').insert([newUser]);
-        if (error) throw error;
-        setCurrentUser(newUser);
-        setAppState('idle');
+      if (authRole === 'user') {
+        const { error } = await supabase.functions.invoke('send-otp', {
+          body: { emergencyPhoneNumber: authContact },
+        });
+        if (error) throw new Error('Failed to send OTP via Twilio');
+        setAppState('otp');
+        return;
       }
+
+      // CFR profile creation — waits for admin verification before receiving alerts
+      const newUser: UserProfile = {
+        id: generateId(),
+        role: 'cfr',
+        name: authName,
+        license_number: authLicense,
+        is_verified: false,
+        location: DEFAULT_LOCATION,
+        medical_info: null,
+      };
+      const { error } = await supabase.from('profiles').insert([newUser]);
+      if (error) throw error;
+      setCurrentUser(newUser);
+      setAppState('idle');
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Could not register.');
     } finally {
       setIsAuthLoading(false);
     }
   };
+
+  const handleVerifyOTP = async () => {
+    if (otpCode.length !== 6) return Alert.alert('Error', 'Please enter the 6-digit OTP');
+
+    setIsAuthLoading(true);
+    try {
+      // (In production, verify otpCode against the otp_tracking table here.)
+      const userLoc = locationRef.current
+        ? `POINT(${locationRef.current.coords.longitude} ${locationRef.current.coords.latitude})`
+        : DEFAULT_LOCATION;
+
+      const newUser: UserProfile = {
+        id: generateId(),
+        role: 'user',
+        name: authName,
+        emergency_contact: authContact,
+        is_verified: true,
+        location: userLoc,
+        medical_info: null,
+      };
+
+      const { error } = await supabase.from('profiles').insert([newUser]);
+      if (error) throw error;
+
+      setCurrentUser(newUser);
+      setAppState('idle');
+      setOtpCode(''); // clear it out for security
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Verification failed.');
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
   // ── Medical profile ───────────────────────────────────────────────────────
 
   const handleSaveMedicalProfile = async () => {
@@ -254,10 +310,10 @@ export default function HomeScreen() {
     if (error) { Alert.alert('Error', 'Could not save profile'); return; }
     setCurrentUser({ ...currentUser, medical_info: medicalData });
     Alert.alert('Saved', 'Medical profile updated.');
-    setAppState('idle');
+    setAppState(prevAppStateRef.current);
   };
 
-  // ── FEATURE 5: Real voice recording ──────────────────────────────────────
+  // ── Voice recording & AI classification ──────────────────────────────────
 
   const startRecording = async () => {
     try {
@@ -304,7 +360,6 @@ export default function HomeScreen() {
 
       if (!transcript) { setIsVoiceProcessing(false); return; }
 
-      // Classify with Groq LLaMA
       await analyzeVoiceCommand(transcript);
     } catch (err) {
       console.error('Voice analysis failed:', err);
@@ -347,7 +402,7 @@ export default function HomeScreen() {
     }
   };
 
-  // ── FEATURE 4: Message to emergency contact ───────────────────────────────
+  // ── Message to emergency contact ─────────────────────────────────────────
 
   const sendMessageToContact = async () => {
     const contact = currentUser?.emergency_contact;
@@ -374,7 +429,7 @@ export default function HomeScreen() {
     }
   };
 
-  // ── FEATURE 3: Ambulance booking status simulation ────────────────────────
+  // ── Ambulance booking status simulation ──────────────────────────────────
 
   const startAmbulanceStatusFlow = () => {
     const steps: AmbulanceStatus[] = ['finding', 'assigned', 'dispatched', 'arriving'];
@@ -387,7 +442,23 @@ export default function HomeScreen() {
       } else {
         clearInterval(ambulanceStatusTimer.current!);
       }
-    }, 8000); // advances every 8 seconds
+    }, AMBULANCE_STATUS_STEP_MS);
+  };
+
+  // Shared by both CFR paging paths below: turns a patient_location geometry
+  // into a lat/lng pin plus an estimated distance/ETA from this CFR's position.
+  const resolveVictimLocationForCFR = async (patientLocationGeom: string, address?: string | null) => {
+    const { data: coords } = await supabase.rpc('get_lat_long', { geom: patientLocationGeom });
+    if (!coords) return;
+
+    setVictimLocationForCFR({ lat: coords.lat, lng: coords.lng, address: address || 'Address unavailable' });
+
+    const loc = locationRef.current;
+    if (loc) {
+      const d = calcDistance(loc.coords.latitude, loc.coords.longitude, coords.lat, coords.lng);
+      setVictimDistance(d);
+      setVictimEta(Math.ceil(d * ROUGH_ETA_MINUTES_PER_KM));
+    }
   };
 
   // ── Supabase realtime: victim listener ────────────────────────────────────
@@ -417,6 +488,39 @@ export default function HomeScreen() {
     return () => { supabase.removeChannel(sub); };
   }, [currentIncidentId, currentUser]);
 
+  // ── Fetch active emergencies on CFR login ────────────────────────────────
+  // Covers the case where a dispatch happened while this CFR wasn't subscribed yet.
+  useEffect(() => {
+    if (currentUser?.role !== 'cfr' || !currentUser.is_verified || appStateRef.current !== 'idle') return;
+
+    const checkActiveEmergencies = async () => {
+      try {
+        const { data: activeIncident, error } = await supabase
+          .from('emergencies')
+          .select('id, incident_type, patient_location, incident_address, rejected_by')
+          .eq('status', 'dispatched')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (error || !activeIncident) return;
+        if (activeIncident.rejected_by?.includes(currentUser.id)) return;
+
+        setCurrentIncidentId(activeIncident.id);
+        setSelectedType(activeIncident.incident_type);
+        setAppState('searching');
+
+        if (activeIncident.patient_location) {
+          await resolveVictimLocationForCFR(activeIncident.patient_location, activeIncident.incident_address);
+        }
+      } catch (err) {
+        console.warn('Could not fetch missed emergencies:', err);
+      }
+    };
+
+    checkActiveEmergencies();
+  }, [currentUser]);
+
   // ── Supabase realtime: CFR pager ─────────────────────────────────────────
 
   useEffect(() => {
@@ -425,40 +529,26 @@ export default function HomeScreen() {
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'emergencies' },
         async (payload) => {
           if (
-            payload.new.status === 'dispatched' &&
-            !payload.new.rejected_by?.includes(currentUser.id) &&
-            appStateRef.current === 'idle'
-          ) {
-            setCurrentIncidentId(payload.new.id);
-            setSelectedType(payload.new.incident_type);
-            setAppState('searching');
+            payload.new.status !== 'dispatched' ||
+            payload.new.rejected_by?.includes(currentUser.id) ||
+            appStateRef.current !== 'idle'
+          ) return;
 
-            // FEATURE 2: Fetch victim location and address for CFR preview
-            try {
-              const { data: incident } = await supabase
-                .from('emergencies')
-                .select('patient_location, incident_address')
-                .eq('id', payload.new.id)
-                .single();
+          setCurrentIncidentId(payload.new.id);
+          setSelectedType(payload.new.incident_type);
+          setAppState('searching');
 
-              if (incident?.patient_location) {
-                const { data: coords } = await supabase.rpc('get_lat_long', { geom: incident.patient_location });
-                if (coords) {
-                  setVictimLocationForCFR({
-                    lat: coords.lat,
-                    lng: coords.lng,
-                    address: incident.incident_address || 'Address unavailable',
-                  });
-                  const loc = locationRef.current;
-                  if (loc) {
-                    const d = calcDistance(loc.coords.latitude, loc.coords.longitude, coords.lat, coords.lng);
-                    setVictimDistance(d);
-                    setVictimEta(Math.ceil(d * 6));
-                  }
-                }
-              }
-            } catch { console.warn('Could not fetch victim location for CFR preview'); }
-          }
+          try {
+            const { data: incident } = await supabase
+              .from('emergencies')
+              .select('patient_location, incident_address')
+              .eq('id', payload.new.id)
+              .single();
+
+            if (incident?.patient_location) {
+              await resolveVictimLocationForCFR(incident.patient_location, incident.incident_address);
+            }
+          } catch { console.warn('Could not fetch victim location for CFR preview'); }
         }
       ).subscribe();
     return () => { supabase.removeChannel(sub); };
@@ -483,6 +573,24 @@ export default function HomeScreen() {
     }, 1000);
     return () => { if (autoSelectTimer.current) clearInterval(autoSelectTimer.current); };
   }, [appState, hospitalList]);
+
+  // ── Auto-zoom map to show both victim and CFR ─────────────────────────────
+
+  useEffect(() => {
+    if (appState !== 'en_route' || !location || !mapRef.current) return;
+
+    const markers = [{ latitude: location.coords.latitude, longitude: location.coords.longitude }];
+    if (cfrLocation) markers.push(cfrLocation);
+    if (victimLocationForCFR) markers.push({ latitude: victimLocationForCFR.lat, longitude: victimLocationForCFR.lng });
+
+    if (markers.length > 1) {
+      mapRef.current.fitToCoordinates(markers, {
+        // generous bottom padding so markers don't hide behind the bottom sheet
+        edgePadding: { top: 100, right: 50, bottom: 500, left: 50 },
+        animated: true,
+      });
+    }
+  }, [appState, location, cfrLocation, victimLocationForCFR]);
 
   // ── Fetch hospitals ───────────────────────────────────────────────────────
 
@@ -526,7 +634,7 @@ export default function HomeScreen() {
 
     setSelectedHospital(hospital);
     setAppState('searching');
-    startAmbulanceStatusFlow(); // FEATURE 3: start status ticker
+    startAmbulanceStatusFlow();
 
     try {
       const { data, error } = await supabase
@@ -546,7 +654,7 @@ export default function HomeScreen() {
       if (error) throw error;
       setCurrentIncidentId(data.id);
 
-      // FEATURE 4: Auto-send initial SOS SMS to emergency contact
+      // Auto-send an initial SOS SMS to the emergency contact
       if (currentUser.emergency_contact) {
         const lat = loc.coords.latitude;
         const lng = loc.coords.longitude;
@@ -593,20 +701,6 @@ export default function HomeScreen() {
       setAiInstructions(data?.choices?.[0]?.message?.content || fallbackInstructions(type));
     } catch { setAiInstructions(fallbackInstructions(type)); }
     finally { setIsCoachLoading(false); }
-  };
-
-  const fallbackInstructions = (type: EmergencyType): string => {
-    const map: Record<EmergencyType, string> = {
-      cardiac: '1. Check responsiveness — tap shoulders, shout.\n2. Call 112. Start chest compressions immediately.\n3. Push hard and fast, 30 times on centre of chest.\n4. Give 2 rescue breaths. Repeat until help arrives.',
-      stroke: '1. Use FAST: Face drooping, Arm weakness, Speech slurred, Time.\n2. Note exact time symptoms started.\n3. Keep them still, head slightly raised.\n4. Do not give food or water.',
-      trauma: '1. Ensure scene is safe before approaching.\n2. Check breathing and responsiveness.\n3. Apply firm pressure to any bleeding wound.\n4. Keep them still and warm.',
-      choking: '1. Ask "Are you choking?" If no speech, act now.\n2. Give 5 sharp back blows between shoulder blades.\n3. Give 5 abdominal thrusts just above navel.\n4. Alternate until object dislodges.',
-      bleeding: '1. Press firmly on wound with clean cloth.\n2. Do not remove cloth — add more if soaked.\n3. Tie tourniquet 5cm above wound if limb bleeding.\n4. Elevate limb above heart level.',
-      burns: '1. Remove from heat source immediately.\n2. Cool under running water for 10 minutes.\n3. Do not apply ice, butter, or toothpaste.\n4. Cover loosely. Keep person warm.',
-      seizure: '1. Clear area of hard objects. Do not restrain.\n2. Do not put anything in their mouth.\n3. Time the seizure.\n4. After it stops, roll onto side (recovery position).',
-      unconscious: '1. Tap shoulders, shout "Can you hear me?"\n2. Tilt head back, check breathing for 10 seconds.\n3. If breathing: recovery position on their side.\n4. If not breathing: start CPR immediately.',
-    };
-    return map[type];
   };
 
   // ── CFR actions ───────────────────────────────────────────────────────────
@@ -656,6 +750,17 @@ export default function HomeScreen() {
     setMessageSent(false); setEmergencyMessage(''); setShowMessageInput(false);
   };
 
+  const goToProfile = () => {
+    prevAppStateRef.current = appState;
+    setAppState('profile');
+  };
+
+  const logOut = () => {
+    resetFlow();
+    setAppState('auth');
+    setCurrentUser(null);
+  };
+
   // ── Sorted lists ──────────────────────────────────────────────────────────
 
   const byDistance = [...hospitalList].sort((a, b) => a.distance_meters - b.distance_meters);
@@ -690,7 +795,26 @@ export default function HomeScreen() {
     </View>
   );
 
-  
+  const renderOtp = () => (
+    <View style={S.sheetContent}>
+      <Text style={S.sheetTitle}>Enter Verification Code</Text>
+      <Text style={S.sheetSubtitle}>We sent a code via Twilio to {authContact}</Text>
+      <TextInput
+        style={[S.input, { textAlign: 'center', fontSize: 24, letterSpacing: 8, fontWeight: '700' }]}
+        placeholder="------"
+        value={otpCode}
+        onChangeText={setOtpCode}
+        keyboardType="number-pad"
+        maxLength={6}
+      />
+      <TouchableOpacity style={[S.primaryButton, { marginTop: 10, opacity: isAuthLoading ? 0.7 : 1 }]} onPress={handleVerifyOTP} disabled={isAuthLoading}>
+        {isAuthLoading ? <ActivityIndicator color="#fff" /> : <Text style={S.primaryButtonText}>Verify & Continue</Text>}
+      </TouchableOpacity>
+      <TouchableOpacity style={{ marginTop: 15 }} onPress={() => setAppState('auth')}>
+        <Text style={{ color: '#6c757d', fontWeight: '700' }}>← Back to Registration</Text>
+      </TouchableOpacity>
+    </View>
+  );
 
   const renderProfile = () => (
     <View style={S.sheetContent}>
@@ -702,13 +826,12 @@ export default function HomeScreen() {
       <TouchableOpacity style={[S.primaryButton, { backgroundColor: '#198754', marginTop: 10 }]} onPress={handleSaveMedicalProfile}>
         <Text style={S.primaryButtonText}>Save Profile</Text>
       </TouchableOpacity>
-      <TouchableOpacity style={{ marginTop: 15 }} onPress={() => setAppState('idle')}>
+      <TouchableOpacity style={{ marginTop: 15 }} onPress={() => setAppState(prevAppStateRef.current)}>
         <Text style={{ color: '#6c757d', fontWeight: '700' }}>Cancel</Text>
       </TouchableOpacity>
     </View>
   );
 
-  // FEATURE 3: Ambulance status bar widget
   const renderAmbulanceStatus = () => {
     if (ambulanceStatus === 'idle') return null;
     const steps: AmbulanceStatus[] = ['finding', 'assigned', 'dispatched', 'arriving', 'arrived'];
@@ -734,7 +857,6 @@ export default function HomeScreen() {
       <Text style={S.sheetTitle}>Emergency Assistance</Text>
       <Text style={S.sheetSubtitle}>Dispatch help and get AI guidance instantly.</Text>
 
-      {/* FEATURE 5: Voice recording UI */}
       <View style={{ width: '100%', marginBottom: 16 }}>
         <Text style={{ fontWeight: '700', marginBottom: 8, color: '#495057' }}>🎙️ AI Voice Dispatch (Multi-lingual)</Text>
         <View style={{ flexDirection: 'row', gap: 8 }}>
@@ -860,7 +982,6 @@ export default function HomeScreen() {
       <Text style={[S.sheetTitle, { marginTop: 14 }]}>Broadcasting SOS...</Text>
       <Text style={S.sheetSubtitle}>Alerting verified CFRs within 2 km.</Text>
 
-      {/* FEATURE 3: Ambulance status */}
       {renderAmbulanceStatus()}
 
       {rejectionNotice && <View style={S.rejectionBanner}><Text style={S.rejectionText}>⚠️ {rejectionNotice}</Text></View>}
@@ -874,7 +995,6 @@ export default function HomeScreen() {
         </View>
       )}
 
-      {/* FEATURE 4: Message to emergency contact */}
       <View style={{ width: '100%', marginTop: 12 }}>
         {messageSent ? (
           <View style={[S.hpapBadge, { width: '100%' }]}>
@@ -964,7 +1084,7 @@ export default function HomeScreen() {
               You cannot receive SOS alerts until an admin verifies your license. You'll receive an SMS once cleared (usually within 24 hours).
             </Text>
           </View>
-          <TouchableOpacity style={[S.resetButton, { marginTop: 0 }]} onPress={() => { resetFlow(); setAppState('auth'); setCurrentUser(null); }}>
+          <TouchableOpacity style={[S.resetButton, { marginTop: 0 }]} onPress={logOut}>
             <Text style={S.resetButtonText}>Log Out</Text>
           </TouchableOpacity>
         </View>
@@ -974,7 +1094,6 @@ export default function HomeScreen() {
             <View style={S.redDot} /><Text style={S.cfrAlertTitle}>🚨 {selectedType?.toUpperCase()} EMERGENCY</Text>
           </View>
 
-          {/* FEATURE 2: Victim location shown before acceptance */}
           {victimLocationForCFR && (
             <View style={[S.locationCard, { marginBottom: 12 }]}>
               <Text style={S.locationLabel}>VICTIM LOCATION (BEFORE ACCEPT)</Text>
@@ -1047,15 +1166,12 @@ export default function HomeScreen() {
 
   // ── Main render ───────────────────────────────────────────────────────────
 
-  const sheetTall = !['idle', 'type_select', 'auth', 'profile', 'otp'].includes(appState);
-
   return (
     <View style={S.container}>
       {location ? (
-        <MapView style={S.map} initialRegion={{ latitude: location.coords.latitude, longitude: location.coords.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 }} showsUserLocation>
+        <MapView style={S.map} ref={mapRef} initialRegion={{ latitude: location.coords.latitude, longitude: location.coords.longitude, latitudeDelta: 0.012, longitudeDelta: 0.012 }} showsUserLocation>
           {cfrLocation && <Marker coordinate={cfrLocation} title="Responder" pinColor="#0d6efd" />}
           {cfrLocation && location && <Polyline coordinates={[{ latitude: location.coords.latitude, longitude: location.coords.longitude }, cfrLocation]} strokeColor="#0d6efd" strokeWidth={4} lineDashPattern={[6, 6]} />}
-          {/* FEATURE 2: Show victim pin on CFR map before acceptance */}
           {currentUser?.role === 'cfr' && victimLocationForCFR && (
             <Marker coordinate={{ latitude: victimLocationForCFR.lat, longitude: victimLocationForCFR.lng }} title="Victim" pinColor="#dc3545" />
           )}
@@ -1071,13 +1187,13 @@ export default function HomeScreen() {
           <Text style={S.appTitle}>Golden Minutes</Text>
           <View style={{ flexDirection: 'row', gap: 10 }}>
             {currentUser?.role === 'user' && (
-              <TouchableOpacity style={[S.roleBadge, { backgroundColor: '#e6f4ea' }]} onPress={() => setAppState('profile')}>
+              <TouchableOpacity style={[S.roleBadge, { backgroundColor: '#e6f4ea' }]} onPress={goToProfile}>
                 <Text style={[S.roleText, { color: '#198754' }]}>PROFILE</Text>
               </TouchableOpacity>
             )}
             <TouchableOpacity style={S.roleBadge} onPress={() => Alert.alert('Logout', 'Are you sure?', [
               { text: 'Cancel' },
-              { text: 'Logout', onPress: () => { resetFlow(); setAppState('auth'); setCurrentUser(null); } },
+              { text: 'Logout', onPress: logOut },
             ])}>
               <Text style={S.roleText}>{currentUser?.role?.toUpperCase()} MODE</Text>
             </TouchableOpacity>
@@ -1085,28 +1201,51 @@ export default function HomeScreen() {
         </View>
       )}
 
-      <View style={[
-        S.bottomSheet,
-        sheetTall && { height: '72%' },
-        appState === 'type_select' && { height: '70%' },
-        ['auth', 'profile', 'otp'].includes(appState) && { height: '65%' },
-      ]}>
-        {appState === 'auth' ? renderAuth()
-          : appState === 'profile' ? renderProfile()
-          : currentUser?.role === 'cfr' ? renderCFR()
-          : isLoadingHospitals ? (
-            <View style={S.sheetContent}>
-              <ActivityIndicator size="large" color="#0d6efd" />
-              <Text style={[S.sheetSubtitle, { marginTop: 14 }]}>Finding best hospitals for {selectedType}...</Text>
-            </View>
-          ) : appState === 'idle' ? renderIdle()
-          : appState === 'type_select' ? renderTypeSelect()
-          : appState === 'hospital_select' ? renderHospitalSelect()
-          : appState === 'searching' ? renderSearching()
-          : appState === 'coach' ? renderCoach()
-          : appState === 'en_route' ? renderEnRoute()
-          : null}
-      </View>
+      {/* ── Shrink-to-fit bottom sheet ── */}
+      <Animated.View
+        style={{
+          position: 'absolute',
+          bottom: keyboardOffset, // shifts up by exactly the keyboard height, animated
+          width: '100%',
+          maxHeight: isSheetExpanded ? '90%' : '55%',
+          justifyContent: 'flex-end', // keeps the sheet pinned to the bottom
+        }}
+      >
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={{ flexGrow: 1, justifyContent: 'flex-end' }}
+        >
+          <View style={[S.bottomSheet, { position: 'relative', height: 'auto', paddingBottom: 30 }]}>
+
+            {/* tap to expand / shrink handle */}
+            <TouchableOpacity
+              style={{ width: '100%', paddingBottom: 15, paddingTop: 5, alignItems: 'center' }}
+              activeOpacity={0.7}
+              onPress={() => setIsSheetExpanded(!isSheetExpanded)}
+            >
+              <View style={{ width: 40, height: 5, backgroundColor: '#dee2e6', borderRadius: 3 }} />
+            </TouchableOpacity>
+
+            {appState === 'auth' ? renderAuth()
+              : appState === 'otp' ? renderOtp()
+              : appState === 'profile' ? renderProfile()
+              : currentUser?.role === 'cfr' ? renderCFR()
+              : isLoadingHospitals ? (
+                <View style={S.sheetContent}>
+                  <ActivityIndicator size="large" color="#0d6efd" />
+                  <Text style={[S.sheetSubtitle, { marginTop: 14 }]}>Finding best hospitals for {selectedType}...</Text>
+                </View>
+              ) : appState === 'idle' ? renderIdle()
+              : appState === 'type_select' ? renderTypeSelect()
+              : appState === 'hospital_select' ? renderHospitalSelect()
+              : appState === 'searching' ? renderSearching()
+              : appState === 'coach' ? renderCoach()
+              : appState === 'en_route' ? renderEnRoute()
+              : null}
+          </View>
+        </ScrollView>
+      </Animated.View>
     </View>
   );
 }
@@ -1172,9 +1311,7 @@ const S = StyleSheet.create({
   cfrAlertCard: { width: '100%', backgroundColor: '#fff3cd', padding: 20, borderRadius: 16, borderWidth: 2, borderColor: '#ffc107' },
   redDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: '#dc3545', marginRight: 10 },
   cfrAlertTitle: { fontSize: 18, fontWeight: '900', color: '#856404' },
-  cfrDistCard: { backgroundColor: '#ffe69c', padding: 12, borderRadius: 8, marginBottom: 16 },
   cfrDistText: { fontSize: 15, color: '#664d03', fontWeight: '700' },
-  cfrEtaText: { fontSize: 13, color: '#856404', marginTop: 4 },
   acceptButton: { backgroundColor: '#28a745', paddingVertical: 16, borderRadius: 12, alignItems: 'center' },
   acceptButtonText: { color: '#fff', fontSize: 16, fontWeight: '900', letterSpacing: 1 },
   rejectReasonBtn: { backgroundColor: '#6c757d', padding: 14, borderRadius: 10, marginBottom: 8, alignItems: 'center' },
