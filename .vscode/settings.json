@@ -3,5 +3,12 @@
     "source.fixAll": "explicit",
     "source.organizeImports": "explicit",
     "source.sortMembers": "explicit"
-  }
+  },
+  
+  "some.existingSetting": true,
+  "deno.enablePaths": [
+    "./supabase/functions"
+  ]
+
 }
+

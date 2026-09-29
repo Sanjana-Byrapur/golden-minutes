@@ -1,8 +1,14 @@
-import { Audio } from 'expo-av';
+import {
+  AudioModule,
+  RecordingPresets,
+  setAudioModeAsync,
+  useAudioRecorder,
+} from 'expo-audio';
 import * as Crypto from 'expo-crypto';
+import { File } from 'expo-file-system';
 import * as Location from 'expo-location';
 import * as SMS from 'expo-sms';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator, Alert, Animated, Keyboard, Linking, Platform,
   ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
@@ -157,7 +163,7 @@ export default function HomeScreen() {
   const [isRecording, setIsRecording] = useState(false);
   const [isVoiceProcessing, setIsVoiceProcessing] = useState(false);
   const [voiceDraft, setVoiceDraft] = useState('');
-  const recordingRef = useRef<Audio.Recording | null>(null);
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
 
   // AI Coach
   const [aiInstructions, setAiInstructions] = useState('');
@@ -316,43 +322,62 @@ export default function HomeScreen() {
   // ── Voice recording & AI classification ──────────────────────────────────
 
   const startRecording = async () => {
-    try {
-      const { granted } = await Audio.requestPermissionsAsync();
-      if (!granted) { Alert.alert('Permission denied', 'Microphone access is needed for voice dispatch.'); return; }
+  try {
+    const { granted } = await AudioModule.requestRecordingPermissionsAsync();
 
-      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-      recordingRef.current = recording;
-      setIsRecording(true);
-    } catch (err) {
-      console.error('Start recording failed:', err);
-      Alert.alert('Error', 'Could not start recording.');
+    if (!granted) {
+      Alert.alert(
+        'Permission denied',
+        'Microphone access is needed for voice dispatch.'
+      );
+      return;
     }
-  };
+
+    await setAudioModeAsync({
+      allowsRecording: true,
+      playsInSilentMode: true,
+    });
+
+    await audioRecorder.prepareToRecordAsync();
+    audioRecorder.record();
+
+    setIsRecording(true);
+  } catch (err) {
+    console.error('Start recording failed:', err);
+    Alert.alert('Error', 'Could not start recording.');
+  }
+};
 
   const stopRecordingAndAnalyze = async () => {
-    if (!recordingRef.current) return;
-    setIsRecording(false);
-    setIsVoiceProcessing(true);
+  if (!audioRecorder.isRecording) return;
 
-    try {
-      await recordingRef.current.stopAndUnloadAsync();
-      const uri = recordingRef.current.getURI();
-      recordingRef.current = null;
+  setIsRecording(false);
+  setIsVoiceProcessing(true);
+
+  try {
+    await audioRecorder.stop();
+    const uri = audioRecorder.uri;
 
       if (!uri) throw new Error('No recording URI');
 
       // Transcribe via Groq Whisper
-      const formData = new FormData();
-      formData.append('file', { uri, type: 'audio/m4a', name: 'recording.m4a' } as any);
-      formData.append('model', 'whisper-large-v3');
-      formData.append('response_format', 'json');
+      const audioFile = new File(uri);
 
-      const whisperRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${process.env.EXPO_PUBLIC_GROQ_API_KEY}` },
-        body: formData,
-      });
+const formData = new FormData();
+formData.append('file', audioFile);
+formData.append('model', 'whisper-large-v3');
+formData.append('response_format', 'json');
+
+const whisperRes = await fetch(
+  'https://api.groq.com/openai/v1/audio/transcriptions',
+  {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.EXPO_PUBLIC_GROQ_API_KEY}`,
+    },
+    body: formData,
+  }
+);
 
       const whisperData = await whisperRes.json();
       const transcript = whisperData?.text || '';
@@ -376,9 +401,37 @@ export default function HomeScreen() {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${process.env.EXPO_PUBLIC_GROQ_API_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'llama-3.1-8b-instant',
+          model: 'openai/gpt-oss-20b',
           messages: [
-            { role: 'system', content: 'You are an emergency AI. Analyze the transcript in ANY language. If it describes a medical emergency, return JSON: {"dispatch": true, "type": "cardiac"|"trauma"|"stroke"|"choking"|"bleeding"|"burns"|"seizure"|"unconscious"}. If not, return {"dispatch": false}.' },
+            {
+            role: 'system',
+            content: `
+          You are an emergency detection AI.
+
+          Analyze the user's transcript in ANY language.
+
+          If the transcript describes a genuine emergency, return:
+          {"dispatch": true, "type": "..."}
+
+          Allowed emergency types:
+          - cardiac: heart attack, cardiac arrest, chest pain with severe symptoms
+          - trauma: accident, road accident, car crash, bike crash, fall, physical injury
+          - stroke: stroke symptoms, facial drooping, speech difficulty, sudden weakness
+          - choking: choking or inability to breathe because of an obstruction
+          - bleeding: severe or uncontrolled bleeding
+          - burns: serious burns or fire-related burns
+          - seizure: seizure or convulsions
+          - unconscious: person is unconscious or unresponsive
+
+          IMPORTANT:
+          - Treat "accident", "road accident", "car accident", "bike accident", "crash", "injured in an accident", etc. as type "trauma".
+          - Do NOT return "accident" as a type. Always return "trauma".
+          - Return ONLY valid JSON.
+
+          If there is no emergency, return:
+          {"dispatch": false}
+            `,
+          },
             { role: 'user', content: text },
           ],
           response_format: { type: 'json_object' },
