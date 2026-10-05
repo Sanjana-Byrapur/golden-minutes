@@ -45,3 +45,5 @@ app-example
 .env
 
 supabase/.temp/
+
+supabase/.temp/
